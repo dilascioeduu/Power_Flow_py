@@ -30,7 +30,7 @@ def power_flow(arquivo_excel):
     for i in range(nb):
         barras[i, 0] = tabela_raw_barras['Bus_No'].iloc[i]  # Copia o ID da Barra
         
-        # Tradução automática do código de operação IEEE
+        # Tradução automática do código de operação IEEE (1 - Slack; 2 - PV; 3 - PQ)
         ieee_code = tabela_raw_barras['Bus_Code'].iloc[i]
         if ieee_code == 1:
             barras[i, 1] = 1  # 1 vira Slack 
@@ -40,7 +40,7 @@ def power_flow(arquivo_excel):
             barras[i, 1] = 3  # 0 vira PQ 
         
         barras[i, 2] = tabela_raw_barras['V_pu'].iloc[i]  # Módulo de tensão inicial
-        barras[i, 3] = tabela_raw_barras['V_th'].iloc[i]  # Ângulo inicial
+        barras[i, 3] = tabela_raw_barras['V_th'].iloc[i]  # Ângulo inicial (0 rad)
         
         # Adaptando as potências líquidas da tabela: (Geração - Carga) / Sbase
         barras[i, 4] = (tabela_raw_barras['Gen_MW'].iloc[i] - tabela_raw_barras['Load_MW'].iloc[i]) / Sbase
@@ -67,28 +67,29 @@ def power_flow(arquivo_excel):
     Ybus = np.zeros((nb, nb), dtype=complex)
 
     for k in range(nl):
-        # np.where é o equivalente exato do comando find()
+        # np.where é o equivalente do comando find() do MATLAB, retornando os índices onde a condição é verdadeira.
         # Pega o índice base 0 da barra correspondente
-        i = np.where(barras[:, 0] == linhas[k, 0])[0][0]
-        j = np.where(barras[:, 0] == linhas[k, 1])[0][0]
+        i = np.where(barras[:, 0] == linhas[k, 0])[0][0] # Resgata as barras de origem (De) que o cabo k interliga
+        j = np.where(barras[:, 0] == linhas[k, 1])[0][0] # Resgata as barras de destino (Para) que o cabo k interliga
         
-        z = linhas[k, 2] + 1j * linhas[k, 3]  # Monta a impedância
+        z = linhas[k, 2] + 1j * linhas[k, 3]  # Monta a impedância (R + jX)
         B_shunt = linhas[k, 4]
         tap = linhas[k, 5]
         
         y = 1 / z  # Transforma em admitância
         
-        Ybus[i, j] = -y / tap
+        Ybus[i, j] = -y / tap # A admitância é dividida pelo tap para refletir a transformação de tensão (valor negativo pois estamos fora da diagonal principal)
         Ybus[j, i] = -y / tap
-        Ybus[i, i] = Ybus[i, i] + (y / (tap**2)) + 1j * (B_shunt / 2)
-        Ybus[j, j] = Ybus[j, j] + y + 1j * (B_shunt / 2)
+        Ybus[i, i] = Ybus[i, i] + (y / (tap**2)) + 1j * (B_shunt / 2) # A admitância é dividida pelo tap ao quadrado para...
+        Ybus[j, j] = Ybus[j, j] + y + 1j * (B_shunt / 2) # ...refletir a transformação de tensão, e o shunt é adicionado
+        # A admitância é adicionada diretamente para a barra de destino, e o shunt é adicionado
 
-    Ym = np.abs(Ybus)
-    Yth = np.angle(Ybus)
+    Ym = np.abs(Ybus) # Armazena o valor do módulo de cada elemento da matriz
+    Yth = np.angle(Ybus) # Armazena o valor do ângulo de cada elemento da matriz (em radianos)
 
     # 4 - Início do processo iterativo (NR)
-    V = np.copy(barras[:, 2])
-    theta = np.copy(barras[:, 3])
+    V = np.copy(barras[:, 2]) # Inicializa o vetor de tensões com os valores iniciais da tabela
+    theta = np.copy(barras[:, 3]) # Inicializa o vetor de ângulos com os valores iniciais da tabela (0 rad para todas as barras, exceto a slack que pode ter um valor diferente)
     iter_count = 0
     conv = False
 
@@ -99,21 +100,21 @@ def power_flow(arquivo_excel):
 
         for i in range(nb):
             for j in range(nb):
-                ang = Yth[i, j] + theta[j] - theta[i]
-                Pcalc[i] += Ym[i, j] * V[i] * V[j] * np.cos(ang)
-                Qcalc[i] -= Ym[i, j] * V[i] * V[j] * np.sin(ang)
+                # alpha = gamaij + thetai - thetaj
+                ang = Yth[i, j] + theta[j] - theta[i] # O ângulo é a soma do ângulo da admitância e a diferença dos ângulos de tensão
+                Pcalc[i] += Ym[i, j] * V[i] * V[j] * np.cos(ang) # Potência ativa injetada na barra
+                Qcalc[i] -= Ym[i, j] * V[i] * V[j] * np.sin(ang) # Potência reativa injetada na barra 
 
-        dP = barras[:, 4] - Pcalc
-        dQ = barras[:, 5] - Qcalc
+        dP = barras[:, 4] - Pcalc # Mismatch de potência ativa: potência líquida (Pesp) da barra (geração - carga) menos a potência calculada (Pcalc)
+        dQ = barras[:, 5] - Qcalc # Mismatch de potência reativa: potência líquida (Qesp) da barra (geração - carga) menos a potência calculada (Qcalc)
+
+        idx_P = np.where(barras[:, 1] != 1)[0] # Procura na matriz onde a barra não é referência (PQ ou PV precisam de dP)
+        idx_Q = np.where(barras[:, 1] == 3)[0] # Procura na matriz onde a barra é do tipo PQ (apenas PQ precisam de dQ) 
         
-        # Procura na matriz (idx_P pega diferentes de 1; idx_Q pega iguais a 3)
-        idx_P = np.where(barras[:, 1] != 1)[0]
-        idx_Q = np.where(barras[:, 1] == 3)[0]
-        
-        # Concatenação do vetor Mismatches
+        # Concatenação do vetor Mismatches deltaP e deltaQ
         mis = np.concatenate((dP[idx_P], dQ[idx_Q]))
 
-        if np.max(np.abs(mis)) < tol:
+        if np.max(np.abs(mis)) < tol: # Verifica o critério de parada
             conv = True
             break
 
@@ -126,55 +127,61 @@ def power_flow(arquivo_excel):
         for i in range(nb):
             for j in range(nb):
                 ang = Yth[i, j] + theta[j] - theta[i]
-                if i != j:
+                if i != j: # Verifica se estamos fora da diagonal principal
                     H[i, j] = -V[i] * V[j] * Ym[i, j] * np.sin(ang)
                     N[i, j] = V[i] * Ym[i, j] * np.cos(ang)
                     M[i, j] = -V[i] * V[j] * Ym[i, j] * np.cos(ang)
                     L[i, j] = -V[i] * Ym[i, j] * np.sin(ang)
-                else:
+                else: # Cálculos utilizando as simplificações
                     H[i, i] = -Qcalc[i] - (V[i]**2 * Ybus[i, i].imag)
                     N[i, i] = (Pcalc[i] / V[i]) + (V[i] * Ybus[i, i].real)
                     M[i, i] = Pcalc[i] - (V[i]**2 * Ybus[i, i].real)
                     L[i, i] = (Qcalc[i] / V[i]) - (V[i] * Ybus[i, i].imag)
 
-        # Montagem da Jacobiana combinando os quadrantes usando np.ix_ para mimetizar o MATLAB
-        J11 = H[np.ix_(idx_P, idx_P)]
-        J12 = N[np.ix_(idx_P, idx_Q)]
-        J21 = M[np.ix_(idx_Q, idx_P)]
-        J22 = L[np.ix_(idx_Q, idx_Q)]
+        # Montagem da Jacobiana combinando os quadrantes usando np.ix_ para mimetizar o MATLAB...
+        # ...eliminando as linhas e colunas correspondentes às barras de referência (Slack) e às barras PV para os cálculos de dP e dQ, respectivamente
+        J11 = H[np.ix_(idx_P, idx_P)] # Quadrante H da Jacobiana, selecionando apenas as linhas e colunas correspondentes às barras que não são do tipo Slack (PQ ou PV)
+        J12 = N[np.ix_(idx_P, idx_Q)] # Quadrante N da Jacobiana, selecionando apenas as linhas correspondentes às barras que não são do tipo Slack (PQ ou PV) e as colunas correspondentes às barras do tipo PQ
+        J21 = M[np.ix_(idx_Q, idx_P)] # Quadrante M da Jacobiana, selecionando apenas as linhas correspondentes às barras do tipo PQ e as colunas correspondentes às barras que não são do tipo Slack (PQ ou PV)
+        J22 = L[np.ix_(idx_Q, idx_Q)] # Quadrante L da Jacobiana, selecionando apenas as linhas e colunas correspondentes às barras do tipo PQ
+        # A função np.ix_ é utilizada para criar um índice de seleção que permite extrair submatrizes específicas da matriz original, mimetizando o comportamento do comando de indexação do MATLAB.
         
-        J_sup = np.hstack((J11, J12))
-        J_inf = np.hstack((J21, J22))
-        J = np.vstack((J_sup, J_inf))
-        
+        J_sup = np.hstack((J11, J12)) # Combina os quadrantes H e N horizontalmente para formar a parte superior da Jacobiana
+        J_inf = np.hstack((J21, J22)) # Combina os quadrantes M e L horizontalmente para formar a parte inferior da Jacobiana
+        J = np.vstack((J_sup, J_inf)) # Combina as partes superior e inferior verticalmente para formar a matriz Jacobiana completa, pronta para a resolução do sistema linear
+        # A função np.hstack é utilizada para combinar as matrizes horizontalmente, enquanto a função np.vstack é utilizada para combinar as matrizes verticalmente, mimetizando o comportamento do comando de concatenação do MATLAB.
+
         # Fatoração LU e resolução de estado exatamente como o "[L, U] = lu(J); U\(L\mis)"
         # A função np.linalg.solve utiliza fatoração LU nativamente para solucionar o sistema
         dx = np.linalg.solve(J, mis)
 
         n_p = len(idx_P)
-        theta[idx_P] = theta[idx_P] + dx[0:n_p]
-        V[idx_Q] = V[idx_Q] + dx[n_p:]
+        theta[idx_P] = theta[idx_P] + dx[0:n_p] # Atualização do estado angular para a próxima iteração
+        V[idx_Q] = V[idx_Q] + dx[n_p:] # Atualização do estado de tensão para a próxima iteração
 
     # 5 - Cálculo dos fluxos (P e Q)
     print('\n=PROCESSAMENTO DE FLUXOS E PERDAS=')
 
-    P_fluxo = np.zeros((nl, 2))
-    Q_fluxo = np.zeros((nl, 2))
+    P_fluxo = np.zeros((nl, 2)) # [P_de_para, P_para_de]
+    Q_fluxo = np.zeros((nl, 2)) # [Q_de_para, Q_para_de]
     P_perda = np.zeros(nl)
     Q_perda = np.zeros(nl)
 
     for k in range(nl):
-        i = np.where(barras[:, 0] == linhas[k, 0])[0][0]
-        j = np.where(barras[:, 0] == linhas[k, 1])[0][0]
+        i = np.where(barras[:, 0] == linhas[k, 0])[0][0] # i = linhas(k,0)
+        #  Resgata as barras de origem (De) que o cabo k interliga 
+        j = np.where(barras[:, 0] == linhas[k, 1])[0][0] # j = linhas(k,1)
+        # Resgata as barras de destino (Para) que o cabo k interliga
         
-        y_linha = 1 / (linhas[k, 2] + 1j * linhas[k, 3])
-        b_metade = 1j * (linhas[k, 4] / 2)
-        tap = linhas[k, 5]
+        y_linha = 1 / (linhas[k, 2] + 1j * linhas[k, 3]) # Adamitância do próprio cabo
+        b_metade = 1j * (linhas[k, 4] / 2) # Admitância shunt do cabo, dividida por 2 para refletir a distribuição simétrica entre as barras de origem e destino
+        tap = linhas[k, 5] # Tap do transformador, utilizado para ajustar a tensão e o fluxo de potência entre as barras de origem e destino
         
-        Vi = V[i] * np.exp(1j * theta[i])
-        Vj = V[j] * np.exp(1j * theta[j])
+        Vi = V[i] * np.exp(1j * theta[i]) # Tensão complexa na barra de origem (De), representada em forma polar (magnitude e ângulo)
+        Vj = V[j] * np.exp(1j * theta[j]) # Tensão complexa na barra de destino (Para), representada em forma polar (magnitude e ângulo)
         
-        S_ij = Vi * np.conj(((Vi / (tap**2)) - (Vj / tap)) * y_linha + Vi * b_metade)
+        # Potência complexa S = V * I_conj, onde I é a corrente e pode ser expressa em função das tensões e da admitância da linha.
+        S_ij = Vi * np.conj(((Vi / (tap**2)) - (Vj / tap)) * y_linha + Vi * b_metade) 
         S_ji = Vj * np.conj((Vj - (Vi / tap)) * y_linha + Vj * b_metade)
         
         P_fluxo[k, 0] = S_ij.real
@@ -187,6 +194,8 @@ def power_flow(arquivo_excel):
 
     Perdas_Totais_Ativas_pu = np.sum(P_perda)
     Perdas_Totais_Reativas_pu = np.sum(Q_perda)
+
+    # Conversão para grandezas reais usando a Potência Base (MW e Mvar)
 
     Perdas_Totais_Ativas_MW = Perdas_Totais_Ativas_pu * Sbase
     Perdas_Totais_Reativas_Mvar = Perdas_Totais_Reativas_pu * Sbase
